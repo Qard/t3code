@@ -181,6 +181,7 @@ import {
 } from "../browser/openFileInPreview";
 import { resolveLinkTarget } from "../browser/browserLinkTarget";
 import { PullRequestLinkPreview } from "./pullRequest/PullRequestLinkPreview";
+import { MermaidDiagram } from "./chat/MermaidDiagram";
 
 interface ChatMarkdownProps {
   text: string;
@@ -3072,6 +3073,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
     const language = extractFenceLanguage(codeBlock.className);
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
+    const sourceFallback = (
+      <pre {...props}>
+        <code className={codeBlock.className}>{codeBlock.code}</code>
+      </pre>
+    );
     return (
       <MarkdownCodeBlock
         code={codeBlock.code}
@@ -3079,19 +3085,27 @@ const CHAT_MARKDOWN_COMPONENTS = {
         fenceTitle={fenceTitle}
         theme={resolvedTheme}
       >
-        <RenderErrorBoundary
-          resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}
-          fallback={<pre {...props}>{children}</pre>}
-        >
-          <Suspense fallback={<pre {...props}>{children}</pre>}>
-            <SuspenseShikiCodeBlock
-              className={codeBlock.className}
-              code={codeBlock.code}
-              themeName={diffThemeName}
-              isStreaming={isStreaming}
-            />
-          </Suspense>
-        </RenderErrorBoundary>
+        {language === "mermaid" && !isStreaming ? (
+          <MermaidDiagram
+            source={codeBlock.code.replace(/\n$/, "")}
+            theme={resolvedTheme}
+            fallback={sourceFallback}
+          />
+        ) : (
+          <RenderErrorBoundary
+            resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}
+            fallback={<pre {...props}>{children}</pre>}
+          >
+            <Suspense fallback={<pre {...props}>{children}</pre>}>
+              <SuspenseShikiCodeBlock
+                className={codeBlock.className}
+                code={codeBlock.code}
+                themeName={diffThemeName}
+                isStreaming={isStreaming}
+              />
+            </Suspense>
+          </RenderErrorBoundary>
+        )}
       </MarkdownCodeBlock>
     );
   },

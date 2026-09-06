@@ -9,7 +9,13 @@ import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
 import { setMarkdownTaskChecked } from "./files/filePreviewMode";
 
+const mermaid = vi.hoisted(() => ({
+  initialize: vi.fn(),
+  render: vi.fn(),
+}));
+
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
+vi.mock("mermaid", () => ({ default: mermaid }));
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../hooks/useSettings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../hooks/useSettings")>();
@@ -110,6 +116,52 @@ describe("ChatMarkdown favicon privacy", () => {
 });
 
 describe("ChatMarkdown streaming", () => {
+  it("keeps Mermaid fences as source while streaming", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd="/tmp/project"
+            text={"```mermaid\nflowchart LR\nA --> B\n```"}
+            isStreaming
+          />,
+        );
+      });
+
+      expect(renderer!.root.findAllByProps({ "data-mermaid-diagram": "" })).toHaveLength(0);
+      expect(renderer!.root.findByProps({ "data-language": "mermaid" })).toBeDefined();
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders a settled Mermaid fence as a diagram", async () => {
+    mermaid.render.mockResolvedValueOnce({ svg: "<svg><text>Diagram</text></svg>" });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd="/tmp/project" text={"```mermaid\nflowchart LR\nA --> B\n```"} />,
+        );
+      });
+
+      expect(renderer!.root.findAllByProps({ "data-mermaid-diagram": "" })).toHaveLength(1);
+      expect(mermaid.render).toHaveBeenCalledWith(
+        expect.stringMatching(/^t3-mermaid-/),
+        "flowchart LR\nA --> B",
+      );
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("recovers highlighting after a failed fence changes without resetting its controls", async () => {
     const highlighter = await getSyntaxHighlighterPromise("text");
     const codeToHtml = highlighter.codeToHtml.bind(highlighter);
