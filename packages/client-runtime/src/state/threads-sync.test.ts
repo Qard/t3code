@@ -935,6 +935,37 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect(
+    "keeps partial catch-up progress when disconnected before synchronization completes",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ cached: BASE_THREAD, completionMarker: true });
+        yield* Queue.offer(
+          harness.inputs,
+          titleUpdated("Latest title", CACHED_SNAPSHOT_SEQUENCE + 1),
+        );
+        yield* awaitThreadState(
+          harness.observed,
+          (value) =>
+            value.status === "synchronizing" &&
+            Option.isSome(value.data) &&
+            value.data.value.title === "Latest title",
+        );
+
+        yield* harness.replaceSession;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          if ((yield* Ref.get(harness.subscriptionCount)) >= 2) break;
+          yield* Effect.yieldNow;
+        }
+
+        expect(yield* Ref.get(harness.subscriptionCount)).toBe(2);
+        expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(
+          CACHED_SNAPSHOT_SEQUENCE + 1,
+        );
+        expect((yield* Ref.get(harness.latest)).status).toBe("synchronizing");
+      }),
+  );
+
   it.effect("resubscribes on app foreground from the latest applied sequence", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_THREAD, completionMarker: true });

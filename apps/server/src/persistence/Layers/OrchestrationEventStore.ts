@@ -86,6 +86,9 @@ const AggregateReplayStatsRowSchema = Schema.Struct({
 });
 const DEFAULT_READ_FROM_SEQUENCE_LIMIT = 1_000;
 const READ_PAGE_SIZE = 500;
+// Decode and deliver a small page before fetching more. One indivisible event
+// can exceed the budget; always include it so the cursor can still advance.
+const AGGREGATE_REPLAY_PAGE_BYTES = 256 * 1024;
 
 function inferActorKind(
   event: Omit<OrchestrationEvent, "sequence">,
@@ -218,13 +221,23 @@ const makeEventStore = Effect.gen(function* () {
           correlation_id AS "correlationId",
           payload_json AS "payload",
           metadata_json AS "metadata"
-        FROM orchestration_events
-        WHERE aggregate_kind = ${request.aggregateKind}
-          AND stream_id = ${request.aggregateId}
-          AND sequence > ${request.fromSequenceExclusive}
-          AND sequence <= ${request.toSequenceInclusive}
+        FROM (
+          SELECT *,
+            ROW_NUMBER() OVER (ORDER BY sequence) AS replay_row,
+            SUM(octet_length(payload_json) + octet_length(metadata_json))
+              OVER (ORDER BY sequence ROWS UNBOUNDED PRECEDING) AS replay_bytes
+          FROM (
+            SELECT * FROM orchestration_events
+            WHERE aggregate_kind = ${request.aggregateKind}
+              AND stream_id = ${request.aggregateId}
+              AND sequence > ${request.fromSequenceExclusive}
+              AND sequence <= ${request.toSequenceInclusive}
+            ORDER BY sequence ASC
+            LIMIT ${request.limit}
+          )
+        )
+        WHERE replay_row = 1 OR replay_bytes <= ${AGGREGATE_REPLAY_PAGE_BYTES}
         ORDER BY sequence ASC
-        LIMIT ${request.limit}
       `,
   });
 
@@ -396,11 +409,7 @@ const makeEventStore = Effect.gen(function* () {
             return Stream.empty;
           }
           const nextRemaining = remaining - events.length;
-          if (
-            events.length < READ_PAGE_SIZE ||
-            nextRemaining === 0 ||
-            last.sequence >= input.toSequenceInclusive
-          ) {
+          if (nextRemaining === 0 || last.sequence >= input.toSequenceInclusive) {
             return Stream.fromIterable(events);
           }
           return Stream.concat(Stream.fromIterable(events), readPage(last.sequence, nextRemaining));

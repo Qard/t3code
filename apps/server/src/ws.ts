@@ -342,12 +342,11 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
 const SHELL_RESUME_MAX_GAP = 1_000;
 
-// Thread replay counts only this thread's rows. Busy or pruned unrelated
-// streams must not force a full thread snapshot.
+// Recreated threads need an authoritative snapshot. Keep their missing-snapshot
+// replay fallback bounded; ordinary resumes stream regardless of total size.
 const THREAD_RESUME_MAX_EVENTS = 1_000;
-// Row count alone does not bound replay memory: a few events with large tool
-// payloads can decode to gigabytes. Before replaying, sum the serialized
-// payload bytes of the range in SQL and reset with a snapshot past this budget.
+// Bound legacy global replay and the recreated-thread fallback by bytes too.
+// Ordinary thread replay is byte-paged by the event store.
 const ORCHESTRATION_REPLAY_PAYLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
 
 function toAuthAccessStreamEvent(
@@ -1659,7 +1658,7 @@ const makeWsRpcLayer = (
                     : yield* orchestrationEngine
                         .getThreadReplayStats({
                           ...range,
-                          maxEvents: THREAD_RESUME_MAX_EVENTS,
+                          maxEvents: headSequence - afterSequence,
                         })
                         .pipe(
                           Effect.mapError(
@@ -1672,11 +1671,12 @@ const makeWsRpcLayer = (
                         );
                 if (
                   replayStats !== null &&
-                  replayStats.eventCount <= THREAD_RESUME_MAX_EVENTS &&
-                  replayStats.payloadBytes <= ORCHESTRATION_REPLAY_PAYLOAD_BUDGET_BYTES
+                  (!replayStats.hasCreateEvent ||
+                    (replayStats.eventCount <= THREAD_RESUME_MAX_EVENTS &&
+                      replayStats.payloadBytes <= ORCHESTRATION_REPLAY_PAYLOAD_BUDGET_BYTES))
                 ) {
                   const catchUpStream = orchestrationEngine
-                    .readThreadEvents({ ...range, limit: THREAD_RESUME_MAX_EVENTS })
+                    .readThreadEvents({ ...range, limit: headSequence - afterSequence })
                     .pipe(
                       Stream.filter(isThisThreadDetailEvent),
                       Stream.map((event) => ({
@@ -1706,7 +1706,9 @@ const makeWsRpcLayer = (
                   replayOnMissingSnapshot = replay;
                 }
                 // A recreated thread needs a fresh snapshot if it still exists.
-                // Oversized replays and invalid cursors also use the snapshot path.
+                // Invalid cursors and oversized recreated-thread replays also
+                // use the snapshot path. Ordinary resumes stream byte-bounded
+                // pages, retaining client progress even across transport loss.
               }
 
               const snapshot = yield* projectionSnapshotQuery

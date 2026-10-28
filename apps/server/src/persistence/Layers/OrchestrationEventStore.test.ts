@@ -175,6 +175,56 @@ layer("OrchestrationEventStore", (it) => {
     }),
   );
 
+  it.effect("delivers a large replay page before decoding the next page", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("byte-bounded-replay");
+      const first = messageEvent(threadId, "large-first");
+      const stored = yield* store.append({
+        ...first,
+        payload: { ...first.payload, text: "x".repeat(300_000) },
+      });
+      const next = yield* store.append(messageEvent(threadId, "invalid-next"));
+      yield* sql`UPDATE orchestration_events SET payload_json = '{' WHERE sequence = ${next.sequence}`;
+      const items = yield* store
+        .readAggregateRange({
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          fromSequenceExclusive: 0,
+          toSequenceInclusive: next.sequence,
+        })
+        .pipe(Stream.take(1), Stream.runCollect);
+      assert.deepEqual(
+        items.map((event) => event.sequence),
+        [stored.sequence],
+      );
+    }),
+  );
+
+  it.effect("continues byte-bounded replay pages from the last delivered cursor", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+      const threadId = ThreadId.make("resume-byte-pages");
+      const events = yield* Effect.forEach([1, 2, 3], (id) => {
+        const event = messageEvent(threadId, `page-${id}`);
+        return store.append({ ...event, payload: { ...event.payload, text: "x".repeat(300_000) } });
+      });
+      const items = yield* store
+        .readAggregateRange({
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          fromSequenceExclusive: events[0]!.sequence,
+          toSequenceInclusive: events[2]!.sequence,
+        })
+        .pipe(Stream.runCollect);
+      assert.deepEqual(
+        items.map((event) => event.sequence),
+        events.slice(1).map((event) => event.sequence),
+      );
+    }),
+  );
+
   it.effect("reads one aggregate through the captured head across pruned global gaps", () =>
     Effect.gen(function* () {
       const store = yield* OrchestrationEventStore;

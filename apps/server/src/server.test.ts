@@ -8671,7 +8671,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   );
 
   it.effect(
-    "subscribeThread sends a fresh snapshot when its event count exceeds the replay limit",
+    "subscribeThread streams every event when its event count exceeds the former replay limit",
     () =>
       Effect.gen(function* () {
         let readEventsCalls = 0;
@@ -8687,11 +8687,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   payloadBytes: 1_000,
                   hasCreateEvent: false,
                 }),
-              readThreadEvents: () =>
-                Stream.sync(() => {
-                  readEventsCalls += 1;
-                  return {} as OrchestrationEvent;
-                }),
+              readThreadEvents: ({ limit }) => {
+                readEventsCalls += 1;
+                assert.equal(limit, 99_995);
+                return Stream.fromIterable(
+                  Array.from({ length: 1_001 }, (_, index) =>
+                    makeLiveToolActivityEvent(index + 6, "tool.completed"),
+                  ),
+                );
+              },
             },
             projectionSnapshotQuery: {
               getThreadDetailSnapshot: () =>
@@ -8707,19 +8711,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               threadId: defaultThreadId,
               afterSequence: 5,
               requestCompletionMarker: true,
-            }).pipe(Stream.take(2), Stream.runCollect),
+            }).pipe(
+              Stream.takeUntil((item) => item.kind === "synchronized"),
+              Stream.runCollect,
+            ),
           ),
         );
 
-        const [first, second] = Array.from(items);
-        // Never truncate a thread's replay at the event limit.
-        assert.equal(first?.kind, "snapshot");
-        if (first?.kind === "snapshot") {
-          assert.equal(first.snapshot.thread.id, defaultThreadId);
-          assert.equal(first.snapshot.snapshotSequence, 100_000);
-        }
-        assert.equal(second?.kind, "synchronized");
-        assert.equal(readEventsCalls, 0);
+        assert.deepEqual(
+          items.map((item) => (item.kind === "event" ? item.event.sequence : item.kind)),
+          [...Array.from({ length: 1_001 }, (_, index) => index + 6), "synchronized"],
+        );
+        assert.equal(readEventsCalls, 1);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -9389,7 +9392,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("subscriptions snapshot instead of decoding an oversized replay range", () =>
+  it.effect("thread subscriptions replay oversized ranges while shell subscriptions snapshot", () =>
     Effect.gen(function* () {
       let readEventsCalls = 0;
       let replayStatsCalls = 0;
@@ -9404,14 +9407,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               Effect.sync(() => {
                 replayStatsCalls += 1;
                 return {
-                  eventCount: 5,
+                  eventCount: 1_005,
                   payloadBytes: 8 * 1024 * 1024 + 1,
                   hasCreateEvent: false,
                 };
               }),
             readThreadEvents: () => {
               readEventsCalls += 1;
-              return Stream.empty;
+              return Stream.make({
+                ...makeLiveToolActivityEvent(5, "tool.completed"),
+                aggregateId: thread.id,
+                sequence: 5,
+              });
             },
             readEvents: () =>
               Stream.sync(() => {
@@ -9457,12 +9464,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.equal(threadItems[0]?.kind, "snapshot");
+      assert.equal(threadItems[0]?.kind, "event");
       assert.equal(threadItems[1]?.kind, "synchronized");
       assert.equal(shellItems[0]?.kind, "snapshot");
       assert.equal(shellItems[1]?.kind, "synchronized");
       assert.equal(replayStatsCalls, 2);
-      assert.equal(readEventsCalls, 0);
+      assert.equal(readEventsCalls, 1);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
